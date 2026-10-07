@@ -62,6 +62,17 @@ def setup_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def _safe_replace(src, dst, retries=10):
+    # Windows: 杀毒软件/索引服务短暂占用文件时 os.replace 会报 PermissionError，重试而不是让训练崩溃
+    import time
+    for i in range(retries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(min(2 ** i, 30))
+    print(f'[warn] 无法覆盖 {dst}，本次保存保留在 {src}，训练继续')
+
 def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
@@ -75,7 +86,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         state_dict = {k: v.half().cpu() for k, v in state_dict.items()}
         ckp_tmp = ckp_path + '.tmp'
         torch.save(state_dict, ckp_tmp)
-        os.replace(ckp_tmp, ckp_path)
+        _safe_replace(ckp_tmp, ckp_path)
         wandb_id = None
         if wandb:
             if hasattr(wandb, 'get_run'):
@@ -103,7 +114,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
 
         resume_tmp = resume_path + '.tmp'
         torch.save(resume_data, resume_tmp)
-        os.replace(resume_tmp, resume_path)
+        _safe_replace(resume_tmp, resume_path)
         del state_dict, resume_data
         torch.cuda.empty_cache()
     else:  # 加载模式
