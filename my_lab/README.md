@@ -92,10 +92,53 @@ python my_lab/attn_demo.py "小明养了一只猫，它很可爱" 6
 
 打印第 6 个 token（"它"）在 8 层、每层 8 个头里，把注意力分给了前面哪些 token。第 2 层第 3 个头把 0.44 的注意力给了"猫"；整体上，大部分注意力落在逗号和自己身上。换成"小红买了一本书，她很喜欢"时，没有哪个头明显指向"小红"（"小红"被拆成了两个 token，而且模型很小）。
 
+## 5. 工具调用
+
+SFT 数据里已经混入了约 10 万条工具调用样本，所以不需要单独训练。`scripts/eval_toolcall.py` 的工具全是模拟的（天气永远 22°C，单位换算永远乘 0.621371）。
+
+```bash
+python my_lab/toolcall_trace.py     # 分 7 步展示：程序拼输入 → 模型逐 token 写请求 → 程序解析并执行 → 结果交还模型 → 最终回答
+```
+
+- 模型只会写字："要不要用工具"就是第 1 个 token 预测出 `<tool_call>`（概率 0.75），"用哪个工具"是第 8 个 token（`get` 0.81）。真正执行工具的是 Python 程序。
+- 工具说明会占很长的输入：0 个工具 30 token，2 个 407，8 个 **1317**（超过了 SFT 训练时的 768）。
+- `cd scripts; python eval_toolcall.py --weight full_sft` 的 8 个自动测试：单步任务（算乘法、换算单位、查天气）基本都对；两步任务（生成随机数再求平方）失败；有一题参数填错（汇率工具填了 `timezone`），只是因为模拟工具不看参数，答案才碰巧对；英文加多任务完全没调用工具。
+
+## 6. DPO
+
+```bash
+python my_lab/show_dpo.py                      # 看 chosen / rejected 数据
+cd trainer
+python -u train_dpo.py --dtype float16 --batch_size 4 --num_workers 2 --epochs 1 --log_interval 100 --save_interval 500 --from_resume 1
+python -u train_dpo.py ... --learning_rate 1e-6 --save_weight dpo_lr1e6     # 对比实验，只改学习率
+cd ..
+python my_lab/dpo_eval.py --weight dpo         # 偏好准确率（参考模型 full_sft）
+python my_lab/repeat_eval.py                   # 重复率、长度，三个模型 × 8 题 × 3 次
+```
+
+- `dpo.jsonl` 有 17,166 条，同一个问题配一个 chosen、一个 rejected；batch 4 实际是 8 条序列 × 1024 token，加上冻结的参考模型，8 GB 刚好够；4292 步，约 50 分钟。
+- 第一个 loss 是 **0.6937**，和理论值 ln 2 一致（训练开始时策略模型和参考模型相同）。
+- 默认的 `save_interval=100` 每次要写 138 MB + 649 MB，改成 500。
+
+| | SFT | DPO lr 4e-8（默认） | DPO lr 1e-6 |
+|---|---|---|---|
+| 训练 loss（最后 1/4 段的平均） | — | 0.648 | 0.409，波动 0.08～1.39 |
+| 权重相对 SFT 的变化 | 0 | 0.0069% | — |
+| chosen 的平均进步 | 0 | +0.16 | +2.31 |
+| rejected 的平均进步 | 0 | −0.38 | −7.87 |
+| 偏好准确率（训练数据中抽 500 条） | 50% | 74.6% | 88.8% |
+| 对话 | 基线 | 几乎看不出变化（每个 token 的概率只变了约 0.15%） | 条理和格式明显变好；重复和跑题更多（"多语言支持"写 6 遍、"光合作用并非标准术语"） |
+
+- DPO 主要是在压低 rejected，而不是拉高 chosen。
+- 指标好不等于回答好：偏好准确率只衡量"更偏向 chosen"，而且评估用的是训练数据。大学习率学到了标注员喜欢的"有条理"（格式 / 长度偏差），代价是重复变多。这就是作者把学习率设成 4e-8 的原因。
+- 各阶段对权重的改动：随机初始化 → 预训练 106.8%，预训练 → SFT 9.56%，SFT → DPO 0.0069%；身份 LoRA 的 ΔW 是 q/o 原权重的 22.8%（存在单独的文件里，原模型不变）。
+
 ## 下一步
 
-- [ ] 测试 SFT 模型的工具调用能力（SFT 数据里已混入约 10 万条 Tool Call 样本）
-- [ ] DPO
+- [x] 测试 SFT 模型的工具调用能力
+- [x] DPO（还差 `repeat_eval.py` 的统计结果）
 - [ ] GRPO / PPO / CISPO（先确认 8 GB 显存够不够）
 - [ ] 知识蒸馏
 - [ ] 用 `max_seq_len=768` 重跑预训练
+
+学习笔记（概念讲解、我的问题和解答、小检验）在 [LLM学习笔记.md](LLM学习笔记.md)。
