@@ -135,11 +135,43 @@ python my_lab/repeat_eval.py                   # 重复率、长度，三个模�
 - 指标好不等于回答好：偏好准确率只衡量"更偏向 chosen"，而且评估用的是训练数据。大学习率学到了标注员喜欢的"有条理"，最明确的代价是**长度偏差**（写满上限 54% → 83%），平均重复只略增。这就是作者把学习率设成 4e-8 的原因。
 - 各阶段对权重的改动：随机初始化 → 预训练 106.8%，预训练 → SFT 9.56%，SFT → DPO 0.0069%；身份 LoRA 的 ΔW 是 q/o 原权重的 22.8%（存在单独的文件里，原模型不变）。
 
+## 7. GRPO
+
+需要奖励模型 `internlm/internlm2-1_8b-reward`（3.4 GB，放在 minimind 的同级目录，加载时 `trust_remote_code=True`，fp16 占 3.4 GB 显存）和 `rlaif.jsonl`（19,502 道只有问题的题）。
+
+```bash
+python my_lab/reward_demo.py                           # 体验裁判：规则 + 奖励模型怎么打分
+python my_lab/make_rlaif_split.py --n_train 1500 --n_eval 100
+cd trainer
+cmd /c "python -u train_grpo.py --dtype float16 --num_workers 2 --loss_type grpo --batch_size 1 --num_generations 4 --max_gen_len 384 --data_path ../dataset/rlaif_train1500.jsonl --save_interval 100 --from_resume 1 --debug_mode --debug_interval 50 > ..\grpo.log 2>&1"
+cd ..
+python my_lab/grpo_eval.py --weights full_sft,grpo      # 100 道没见过的题 × 2 个回答
+```
+
+- `train_grpo.py` 的默认 `--loss_type` 是 `cispo`，要学 GRPO 得指定 `grpo`。
+- **修复 1**：`train_grpo.py` 在 fp16 下没有 GradScaler，补上了（作者用 bf16 所以没遇到）。`train_ppo.py`、`train_agent.py` 有同样问题。
+- **修复 2**：输出重定向到文件时 Windows 用 GBK，数据里一个落单的代理字符 `홀` 让 `Logger` 打印 `[DEBUG]` 时崩溃；改为编码失败时转义再打印。
+- 每步约 10～13 秒，全量要 53 小时，所以只用 1500 道题，约 5 小时。
+- `Actor Loss` 一直显示 0 是正常的（每次生成后只更新一次，ratio = 1），要看 Reward。
+
+| | SFT | GRPO |
+|---|---|---|
+| 平均总奖励（100 道评估题） | −1.506 | **−1.332** |
+| 奖励模型分 / 规则分 | −1.614 / +0.109 | −1.504 / +0.172 |
+| 平均长度 | 187 | 218 |
+| 有思考过程 | 14% | **30%** |
+| 写满 384 上限 | 24% | 24% |
+
+- 提升的 95% bootstrap 置信区间 [+0.05, +0.29]，不含 0；200 对回答 GRPO 更好 99、更差 65、相同 36。
+- 但看具体回答：GRPO 主要学会了"写思考过程"（规则最多给 +1.25），思考内容是套路（"好的，用户问的是……首先，我需要……"），常常太长、挤掉回答；部分"进步"来自 SFT 那次恰好严重重复。奖励设计决定了模型学到什么。
+- 奖励本身的漏洞（`reward_demo.py`）：不到 20 字的正确短答被扣分；重复惩罚按词切分，检测不到中文换着说法的重复；奖励模型几乎分不清"首都是北京"和"首都是上海"。
+
 ## 下一步
 
 - [x] 测试 SFT 模型的工具调用能力
 - [x] DPO
-- [ ] GRPO / PPO / CISPO（先确认 8 GB 显存够不够）
+- [x] GRPO
+- [ ] PPO / CISPO
 - [ ] 知识蒸馏
 - [ ] 用 `max_seq_len=768` 重跑预训练
 

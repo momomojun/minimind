@@ -142,12 +142,14 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
             per_token_loss = -(torch.min(per_token_loss1, per_token_loss2) - args.beta * per_token_kl)
         policy_loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1).clamp(min=1)).mean()
         loss = (policy_loss + aux_loss) / args.accumulation_steps  # scalar
-        loss.backward()
+        scaler.scale(loss).backward()
 
         if step % args.accumulation_steps == 0 or step == iters:
+            scaler.unscale_(optimizer)
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             optimizer.zero_grad()
 
@@ -251,7 +253,9 @@ if __name__ == "__main__":
     device_type = "cuda" if "cuda" in args.device else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
-    
+    # fp16 的数值范围小，梯度容易下溢成 0，需要 GradScaler（和 train_pretrain/train_full_sft 一致；bf16 时不启用）
+    scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
+
     # ========== 4. 配wandb ==========
     wandb = None
     if args.use_wandb and is_main_process():

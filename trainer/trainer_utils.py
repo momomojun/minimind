@@ -36,7 +36,12 @@ def is_main_process():
 
 def Logger(content):
     if is_main_process():
-        print(content)
+        try:
+            print(content)
+        except UnicodeEncodeError:
+            # Windows 把输出重定向到文件时用 GBK 编码；数据里个别非法字符（如落单的代理字符）编码不了，转义后再打印，不让训练崩溃
+            enc = sys.stdout.encoding or 'utf-8'
+            print(str(content).encode(enc, errors='backslashreplace').decode(enc))
 
 
 def get_lr(current_step, total_steps, lr):
